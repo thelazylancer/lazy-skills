@@ -1,0 +1,3 @@
+interface:
+  display_name: "Image Prompt Engineer"
+  short_description: "Turn image ideas and references into reliable generation prompts"
