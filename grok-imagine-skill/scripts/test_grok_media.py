@@ -2,6 +2,7 @@ import base64
 import importlib.util
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,14 @@ spec.loader.exec_module(grok_media)
 
 
 class GrokMediaTest(unittest.TestCase):
+    def test_skill_dotenv_is_loaded_without_overriding_process_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text("GROK_API_KEY=dotenv-secret\n")
+            with patch.object(grok_media, "__file__", str(root / "scripts" / "grok_media.py")):
+                with patch.dict(os.environ, {}, clear=True):
+                    self.assertEqual(grok_media.load_dotenv()["GROK_API_KEY"], "dotenv-secret")
+
     def test_relative_video_url_and_auth_header(self):
         def fake_curl(args, timeout):
             Path(args[args.index("-o") + 1]).write_bytes(b"video")

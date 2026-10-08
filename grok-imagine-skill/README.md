@@ -31,11 +31,15 @@ python3 scripts/grok_media.py --base-url https://your-relay/v1 --api-key sk-xxx 
 export GROK_BASE_URL=https://api-fast.linkcode.site/v1
 export GROK_API_KEY=sk-xxx
 
-# 3. 配置文件 ~/.config/grok-relay/config.json
+# 3. skill 根目录 .env（推荐本地使用）
+GROK_API_KEY=sk-xxx
+GROK_BASE_URL=https://api-fast.linkcode.site/v1
+
+# 4. 配置文件 ~/.config/grok-relay/config.json
 {"base_url": "https://your-relay/v1", "api_key": "sk-xxx"}
 ```
 
-不给 base_url 时默认使用 `https://api-fast.linkcode.site/v1`。也兼容旧变量名 `GROK_RELAY_BASE_URL` / `GROK_RELAY_API_KEY`。
+不给 base_url 时默认使用 `https://api-fast.linkcode.site/v1`。也兼容旧变量名 `GROK_RELAY_BASE_URL` / `GROK_RELAY_API_KEY`。skill 根目录的 `.env` 已被 Git 忽略。
 
 ## 用法
 

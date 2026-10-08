@@ -31,10 +31,30 @@ DEFAULT_BASE_URL = "https://api-fast.linkcode.site/v1"
 
 
 # ---------- 配置 ----------
+def load_dotenv():
+    """读取 skill 根目录的 .env；不覆盖调用进程已经设置的变量。"""
+    env_file = Path(__file__).resolve().parents[1] / ".env"
+    if not env_file.exists():
+        return {}
+    values = {}
+    for raw in env_file.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if key and key not in os.environ:
+            values[key] = value.strip("\"'")
+    return values
+
+
 def load_config(args):
-    base_url = args.base_url or os.environ.get("GROK_RELAY_BASE_URL") or os.environ.get("GROK_BASE_URL")
+    dotenv = load_dotenv()
+    get_env = lambda key: os.environ.get(key) or dotenv.get(key)
+    base_url = args.base_url or get_env("GROK_RELAY_BASE_URL") or get_env("GROK_BASE_URL")
     api_key = (args.api_key or os.environ.get("GROK_API_KEY") or
-               os.environ.get("GROK_RELAY_API_KEY"))
+               os.environ.get("GROK_RELAY_API_KEY") or dotenv.get("GROK_API_KEY") or
+               dotenv.get("GROK_RELAY_API_KEY"))
     if not (base_url and api_key):
         cfg = Path.home() / ".config" / "grok-relay" / "config.json"
         if cfg.exists():

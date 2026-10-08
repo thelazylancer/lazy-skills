@@ -10,9 +10,16 @@ description: 通过 xAI 官方 API 或任意 OpenAI 兼容中转站调用 Grok I
 
 ## 第一步：确认配置
 
-脚本按顺序找配置：`--base-url` / `--api-key` 参数 → 环境变量 `GROK_BASE_URL` / `GROK_API_KEY`（也兼容 `GROK_RELAY_*`）→ `~/.config/grok-relay/config.json`。base_url 缺省为 `https://api-fast.linkcode.site/v1`。
+脚本按顺序找配置：`--base-url` / `--api-key` 参数 → 环境变量 `GROK_BASE_URL` / `GROK_API_KEY`（也兼容 `GROK_RELAY_*`）→ skill 根目录的 `.env` → `~/.config/grok-relay/config.json`。base_url 缺省为 `https://api-fast.linkcode.site/v1`。
 
 先跑一次 `python3 scripts/grok_media.py video-status probe`：返回 `Malformed request ID` 之类的上游错误说明配置正确；返回"缺少 api_key"就向用户索要 key，之后在本会话内用 `--api-key` 传入。**绝不要把 key 回显到对话文本里、写进输出文件或存进记忆。**
+
+可在 `grok-imagine-skill/.env` 放置：
+```dotenv
+GROK_API_KEY=你的中转站key
+GROK_BASE_URL=https://api-fast.linkcode.site/v1
+```
+该文件已被 `.gitignore` 忽略。
 
 ## 第二步：改写提示词
 
