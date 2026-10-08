@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Upload images to the ImgBed host and create a Buffer post for X or Instagram.
+"""Upload media to the ImgBed host and create a Buffer post for X, Instagram, or TikTok.
 
 Reads IMGBED_URL, IMGBED_AUTH_CODE and BUFFER_API_KEY from the environment,
 falling back to the thelazybabyx profile .env. Never prints credentials.
@@ -26,10 +26,15 @@ BUFFER_API = "https://api.buffer.com"
 USER_AGENT = "buffer-post/1.0 (+https://thelazystudio.net)"
 BEIJING = ZoneInfo("Asia/Shanghai")
 PROFILE_ENV = Path.home() / ".hermes/profiles/thelazybabyx/.env"
-# Instagram constraints
+
+# Platform constraints
 IG_MAX_IMAGES = 10
 IG_MAX_FILE_MB = 30
 IG_MAX_DIMENSION = 8000
+TIKTOK_MAX_IMAGES = 35  # TikTok photo carousel limit
+TIKTOK_MAX_VIDEO_MB = 1024
+TIKTOK_MAX_DURATION_SEC = 600  # 10 minutes
+TIKTOK_MAX_IMAGES = 10
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +183,92 @@ def verify_clean(path: Path, expected=None):
         sys.exit(f"metadata not fully stripped from {path.name}: {', '.join(leftover)}")
 
 
+def strip_video_metadata(path: Path, workdir: Path) -> Path:
+    """Remove all metadata from video using ffmpeg.
+
+    Strips title, comment, creation_time, location, and all other metadata tags.
+    Keeps only video/audio streams with no metadata attached.
+    """
+    import subprocess
+
+    dest = workdir / (path.stem + "-" + uuid.uuid4().hex + path.suffix)
+    cmd = [
+        "ffmpeg", "-y", "-i", str(path),
+        "-map_metadata", "-1",  # Strip all global metadata
+        "-map_metadata:s:v", "-1",  # Strip video stream metadata
+        "-map_metadata:s:a", "-1",  # Strip audio stream metadata
+        "-codec", "copy",  # Copy streams without re-encoding
+        "-fflags", "+bitexact",  # Reproducible output
+        "-loglevel", "error",
+        str(dest)
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=300)
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"ffmpeg failed on {path.name}: {e.stderr.decode(errors='replace')}")
+    except subprocess.TimeoutExpired:
+        sys.exit(f"ffmpeg timed out processing {path.name} (>5 minutes)")
+
+    if not dest.exists() or dest.stat().st_size == 0:
+        sys.exit(f"ffmpeg produced empty output for {path.name}")
+
+    verify_video_clean(dest)
+    return dest
+
+
+def verify_video_clean(path: Path):
+    """Check that ffmpeg actually stripped metadata."""
+    import subprocess
+
+    cmd = ["ffprobe", "-v", "error", "-show_entries", "format_tags:stream_tags",
+           "-of", "json", str(path)]
+    try:
+        out = subprocess.check_output(cmd, timeout=30).decode()
+        data = json.loads(out)
+        tags = []
+        if data.get("format", {}).get("tags"):
+            tags.append(f"format tags: {list(data['format']['tags'].keys())}")
+        for stream in data.get("streams", []):
+            if stream.get("tags"):
+                tags.append(f"stream tags: {list(stream['tags'].keys())}")
+        if tags:
+            sys.exit(f"metadata not fully stripped from {path.name}: {', '.join(tags)}")
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"ffprobe verification failed: {e.stderr.decode(errors='replace')}")
+    except subprocess.TimeoutExpired:
+        sys.exit(f"ffprobe timed out on {path.name}")
+
+
+def get_video_info(path: Path) -> dict:
+    """Get video duration, dimensions, and size."""
+    import subprocess
+
+    cmd = ["ffprobe", "-v", "error", "-show_entries",
+           "format=duration,size:stream=width,height,codec_type",
+           "-of", "json", str(path)]
+    try:
+        out = subprocess.check_output(cmd, timeout=30).decode()
+        data = json.loads(out)
+        fmt = data.get("format", {})
+        video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+        return {
+            "duration": float(fmt.get("duration", 0)),
+            "size_mb": int(fmt.get("size", 0)) / (1024 * 1024),
+            "width": video.get("width", 0),
+            "height": video.get("height", 0),
+        }
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"ffprobe failed on {path.name}: {e.stderr.decode(errors='replace')}")
+    except (ValueError, KeyError) as e:
+        sys.exit(f"failed to parse video info for {path.name}: {e}")
+
+
+def is_video(path: Path) -> bool:
+    """Check if file is a video based on extension."""
+    return path.suffix.lower() in {".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v"}
+
+
 def upload_with_retry(path: Path, max_retries=3) -> str:
     """Upload one file to ImgBed with exponential backoff retry."""
     boundary = uuid.uuid4().hex
@@ -242,28 +333,40 @@ def parse_buffer_error(out: dict, res: dict) -> str:
     if "unauthorized" in msg.lower() or any("unauthorized" in str(e).lower() for e in errors):
         return "Buffer API key expired or invalid. Check BUFFER_API_KEY in .env"
     if "channel" in msg.lower() and "not found" in msg.lower():
-        return f"Channel not found. Check BUFFER_CHANNEL_X / BUFFER_CHANNEL_INSTAGRAM in .env"
-    if "image" in msg.lower() or "media" in msg.lower():
-        return f"Image rejected by Buffer: {msg}"
+        return f"Channel not found. Check BUFFER_CHANNEL_X / BUFFER_CHANNEL_INSTAGRAM / BUFFER_CHANNEL_TIKTOK in .env"
+    if "image" in msg.lower() or "media" in msg.lower() or "video" in msg.lower():
+        return f"Media rejected by Buffer: {msg}"
 
     return f"Buffer error: {msg or errors}"
-    if "rate limit" in msg.lower() or any("rate limit" in str(e).lower() for e in errors):
-        return "Buffer rate limit reached. Free plan allows 10 posts/day per channel."
-    if "unauthorized" in msg.lower() or any("unauthorized" in str(e).lower() for e in errors):
-        return "Buffer API key expired or invalid. Check BUFFER_API_KEY in .env"
-    if "channel" in msg.lower() and "not found" in msg.lower():
-        return f"Channel not found. Check CHANNELS dict in script."
-    if "image" in msg.lower() or "media" in msg.lower():
-        return f"Image rejected by Buffer: {msg}"
 
-    return f"Buffer error: {msg or errors}"
+
+def check_media_constraints(path: Path, platform: str):
+    """Check platform-specific media file constraints."""
+    if is_video(path):
+        info = get_video_info(path)
+        if platform == "tiktok":
+            if info["duration"] > TIKTOK_MAX_DURATION_SEC:
+                sys.exit(f"{path.name}: TikTok videos must be ≤{TIKTOK_MAX_DURATION_SEC}s (got {info['duration']:.1f}s)")
+            if info["size_mb"] > TIKTOK_MAX_VIDEO_MB:
+                sys.exit(f"{path.name}: TikTok videos must be ≤{TIKTOK_MAX_VIDEO_MB}MB (got {info['size_mb']:.1f}MB)")
+    else:
+        # Image constraints
+        if platform == "instagram":
+            from PIL import Image
+            with Image.open(path) as im:
+                if max(im.width, im.height) > IG_MAX_DIMENSION:
+                    sys.exit(f"{path.name}: Instagram images must be ≤{IG_MAX_DIMENSION}px (got {im.width}x{im.height})")
+                size_mb = path.stat().st_size / (1024 * 1024)
+                if size_mb > IG_MAX_FILE_MB:
+                    sys.exit(f"{path.name}: Instagram images must be ≤{IG_MAX_FILE_MB}MB (got {size_mb:.1f}MB)")
 
 
 def main():
-    p = argparse.ArgumentParser(description="Create Buffer posts for X or Instagram.")
-    p.add_argument("--platform", required=True, choices=["x", "instagram"])
+    p = argparse.ArgumentParser(description="Create Buffer posts for X, Instagram, or TikTok.")
+    p.add_argument("--platform", required=True, choices=["x", "instagram", "tiktok"])
     p.add_argument("--text", required=True, help="Post text / caption")
     p.add_argument("--image", action="append", default=[], help="Local image path (repeatable, order kept)")
+    p.add_argument("--video", help="Local video path (TikTok only)")
     p.add_argument("--image-url", action="append", default=[], help="Already-hosted public https image URL (repeatable)")
     p.add_argument("--mode", default="draft", choices=["draft", "queue", "schedule", "now"],
                    help="draft (default; unpublished; may use --due-at as a preset time) | queue | schedule (auto-publish; needs --due-at) | now")
@@ -296,6 +399,16 @@ def main():
     if a.platform == "instagram" and total_images > IG_MAX_IMAGES:
         sys.exit(f"Instagram allows max {IG_MAX_IMAGES} images per post, got {total_images}")
 
+    # Check TikTok constraints
+    if a.platform == "tiktok":
+        if a.video and (a.image or a.image_url):
+            sys.exit("TikTok: cannot mix video and images in one post")
+        if not a.video and not a.image and not a.image_url:
+            sys.exit("TikTok posts need at least one video or image")
+        total_media = len(a.image) + len(a.image_url)
+        if not a.video and total_media > TIKTOK_MAX_IMAGES:
+            sys.exit(f"TikTok allows max {TIKTOK_MAX_IMAGES} images per post, got {total_media}")
+
     if not a.dry_run:
         load_env()
 
@@ -303,14 +416,26 @@ def main():
     channels = {
         "x": os.environ.get("BUFFER_CHANNEL_X"),
         "instagram": os.environ.get("BUFFER_CHANNEL_INSTAGRAM"),
+        "tiktok": os.environ.get("BUFFER_CHANNEL_TIKTOK"),
     }
     if not a.dry_run and not channels.get(a.platform):
         sys.exit(f"BUFFER_CHANNEL_{a.platform.upper()} not set in environment")
 
-    images = [Path(i).expanduser() for i in a.image]
-    for img in images:
-        if not img.is_file():
-            sys.exit(f"image not found: {img}")
+    # Collect media files
+    media_files = []
+    if a.video:
+        video_path = Path(a.video).expanduser()
+        if not video_path.is_file():
+            sys.exit(f"video not found: {video_path}")
+        if not is_video(video_path):
+            sys.exit(f"{video_path.name} is not a recognized video format")
+        media_files.append(video_path)
+
+    for img_path in a.image:
+        path = Path(img_path).expanduser()
+        if not path.is_file():
+            sys.exit(f"image not found: {path}")
+        media_files.append(path)
 
     inp = {
         "channelId": channels[a.platform],
@@ -327,8 +452,10 @@ def main():
         inp["saveToDraft"] = True
     if a.mode in {"draft", "schedule"} and a.due_at:
         inp["dueAt"] = to_utc(a.due_at)
+
+    # Platform-specific metadata
     if a.platform == "instagram":
-        if not (images or a.image_url):
+        if not (media_files or a.image_url):
             sys.exit("Instagram posts need at least one image")
         ig = {"type": a.ig_type, "shouldShareToFeed": True}
         if a.ai_label:
@@ -336,31 +463,81 @@ def main():
         if a.first_comment:
             ig["firstComment"] = a.first_comment
         inp["metadata"] = {"instagram": ig}
+    elif a.platform == "tiktok":
+        if not (media_files or a.image_url):
+            sys.exit("TikTok posts need at least one video or image")
+        # TikTok metadata (Buffer API specific fields)
+        tiktok = {"allowComments": True, "allowDuet": True, "allowStitch": True}
+        inp["metadata"] = {"tiktok": tiktok}
 
     with tempfile.TemporaryDirectory(prefix="buffer-post-") as tmp:
-        cleaned = [strip_metadata(i, Path(tmp)) for i in images]
+        # Strip metadata from all media files
+        cleaned = []
+        for path in media_files:
+            if is_video(path):
+                logger.info(f"stripping video metadata from {path.name}...")
+                cleaned.append(strip_video_metadata(path, Path(tmp)))
+            else:
+                cleaned.append(strip_metadata(path, Path(tmp)))
+
         for c in cleaned:
-            check_image_constraints(c, a.platform)
+            check_media_constraints(c, a.platform)
 
         if a.dry_run:
-            from PIL import Image
             files = []
-            for src, dst in zip(images, cleaned):
-                with Image.open(dst) as im:
-                    files.append({"source": str(src), "format": im.format, "size": f"{im.width}x{im.height}",
-                                  "bytes": dst.stat().st_size, "source_bytes": src.stat().st_size,
-                                  "camera": im.getexif().get(272),
-                                  "lens": im.getexif().get_ifd(34665).get(42036)})
-            preview = dict(inp, assets=[{"image": {"url": u}} for u in
-                                       [f"<upload:{c.name}>" for c in cleaned] + a.image_url])
-            print(json.dumps({"payload": preview, "cleaned_images": files}, ensure_ascii=False, indent=2))
+            for src, dst in zip(media_files, cleaned):
+                if is_video(dst):
+                    info = get_video_info(dst)
+                    files.append({
+                        "source": str(src),
+                        "type": "video",
+                        "format": dst.suffix.lstrip('.').upper(),
+                        "duration": f"{info['duration']:.1f}s",
+                        "size": f"{info['width']}x{info['height']}",
+                        "bytes": dst.stat().st_size,
+                        "source_bytes": src.stat().st_size,
+                    })
+                else:
+                    from PIL import Image
+                    with Image.open(dst) as im:
+                        files.append({
+                            "source": str(src),
+                            "type": "image",
+                            "format": im.format,
+                            "size": f"{im.width}x{im.height}",
+                            "bytes": dst.stat().st_size,
+                            "source_bytes": src.stat().st_size,
+                            "camera": im.getexif().get(272),
+                            "lens": im.getexif().get_ifd(34665).get(42036) if im.getexif().get_ifd(34665) else None,
+                        })
+
+            # Build preview assets - Buffer treats videos and images the same in assets array
+            preview_assets = []
+            for c in cleaned:
+                if is_video(c):
+                    preview_assets.append({"video": {"url": f"<upload:{c.name}>"}})
+                else:
+                    preview_assets.append({"image": {"url": f"<upload:{c.name}>"}})
+            preview_assets.extend([{"image": {"url": u}} for u in a.image_url])
+
+            preview = dict(inp, assets=preview_assets)
+            print(json.dumps({"payload": preview, "cleaned_media": files}, ensure_ascii=False, indent=2))
             return
 
-        logger.info(f"uploading {len(cleaned)} image(s) to ImgBed...")
+        logger.info(f"uploading {len(cleaned)} file(s) to ImgBed...")
         urls = [upload_with_retry(c) for c in cleaned] + a.image_url
 
     if urls:
-        inp["assets"] = [{"image": {"url": u}} for u in urls]
+        # Buffer API: videos and images both go in assets array
+        assets = []
+        for i, c in enumerate(cleaned):
+            if is_video(c):
+                assets.append({"video": {"url": urls[i]}})
+            else:
+                assets.append({"image": {"url": urls[i]}})
+        # Add any pre-uploaded image URLs (assuming they're images)
+        assets.extend([{"image": {"url": u}} for u in a.image_url])
+        inp["assets"] = assets
 
     logger.info(f"creating Buffer post on {a.platform} ({a.mode})...")
     query = """mutation($input: CreatePostInput!) { createPost(input: $input) {
@@ -373,9 +550,10 @@ def main():
 
     post = out["post"]
     result = {"platform": a.platform, "post_id": post["id"], "status": post["status"],
-              "due_at": post.get("dueAt"), "image_urls": urls, "timestamp": datetime.now(timezone.utc).isoformat()}
+              "due_at": post.get("dueAt"), "media_urls": urls, "timestamp": datetime.now(timezone.utc).isoformat()}
     logger.info(f"post created: {post['id']} ({post['status']})")
     print(json.dumps(result, ensure_ascii=False, indent=2))
+
 
 
 if __name__ == "__main__":
